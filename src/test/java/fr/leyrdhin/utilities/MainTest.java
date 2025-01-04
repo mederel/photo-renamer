@@ -6,7 +6,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.file.CopyOption;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -40,8 +39,8 @@ class MainTest {
 
         try (Stream<Path> files = Files.list(imagesDir)) {
             List<String> fileNames = files.map(Path::getFileName).map(Path::toString).toList();
-
-            assertThat(fileNames, everyItem(matchesRegex("\\d{8}_\\d{6}\\.(jpg|JPEG|JPG|jpeg)")));
+            System.out.println(fileNames);
+            assertThat(fileNames, everyItem(matchesRegex("\\d{8}_\\d{6}\\.(jpg|mp4)")));
         }
     }
 }
