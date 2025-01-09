@@ -44,7 +44,8 @@ public class Main {
             }
             File rootDir = new File(parsedArgs.getArgList().get(0));
             ParsedOptions parsedOptions = new ParsedOptions(parsedArgs);
-            renamePhotos(rootDir, parsedOptions);
+            renamePhotos(rootDir, parsedOptions, new String[]{".jpg", ".jpeg"}, ".jpg");
+            renamePhotos(rootDir, parsedOptions, new String[]{".arw"}, ".arw");
             processVideos(rootDir, parsedOptions);
         } catch (ParseException e) {
             printHelp(options);
@@ -75,16 +76,18 @@ public class Main {
     }
 
 
-    private static void renamePhotos(File rootDir, ParsedOptions parsedArgs) throws ImageProcessingException, IOException {
+    private static void renamePhotos(File rootDir, ParsedOptions parsedArgs, String[] sourceExtensions, String targetExtension) throws ImageProcessingException, IOException {
         int rootDirAbsPathLength = rootDir.getAbsolutePath().length();
-        for (File jpegFile : FileUtils.listFiles(rootDir, new SuffixFileFilter(new String[]{".jpg", ".jpeg"}, IOCase.INSENSITIVE), TrueFileFilter.INSTANCE)) {
+        for (File jpegFile : FileUtils.listFiles(rootDir, new SuffixFileFilter(sourceExtensions, IOCase.INSENSITIVE), TrueFileFilter.INSTANCE)) {
             System.out.println(jpegFile.getAbsolutePath());
             Metadata metadata = ImageMetadataReader.readMetadata(jpegFile);
             Collection<ExifSubIFDDirectory> exifDirectoryBase = metadata.getDirectoriesOfType(ExifSubIFDDirectory.class);
             for (ExifDirectoryBase directory : exifDirectoryBase) {
+//                Date date = directory.getDate(ExifDirectoryBase.TAG_DATETIME_DIGITIZED, parsedArgs.timeZone);
                 Date date = directory.getDate(ExifDirectoryBase.TAG_DATETIME_DIGITIZED, parsedArgs.timeZone);
                 if (date != null) {
-                    File newFile = datedFile(jpegFile, date, ".jpg");
+                    date = correctWithTimezone(parsedArgs, directory, date);
+                    File newFile = datedFile(jpegFile, date, targetExtension);
                     if (newFile == null) {
                         break;
                     }
@@ -95,6 +98,18 @@ public class Main {
                 }
             }
         }
+    }
+
+    private static Date correctWithTimezone(ParsedOptions parsedArgs, ExifDirectoryBase directory, Date date) {
+        String tzDigit = directory.getString(ExifDirectoryBase.TAG_TIME_ZONE_DIGITIZED);
+        int rawOffset = parsedArgs.timeZone.getRawOffset();
+        if (tzDigit != null) {
+            String tzDigitWithoutMinutes = tzDigit.replaceFirst("^(.*):.*$", "$1");
+            long tzOffset = Integer.parseInt(tzDigitWithoutMinutes) * 60 * 1000;
+            date = new Date(date.getTime() + tzOffset - rawOffset);
+
+        }
+        return date;
     }
 
     private static File datedFile(File sourceFile, Date date, String extension) {
