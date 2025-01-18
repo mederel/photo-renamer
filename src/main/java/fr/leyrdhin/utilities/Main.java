@@ -133,39 +133,36 @@ public class Main {
     private static void processVideos(File rootDir, ParsedOptions parsedOptions) throws Exception {
         int rootDirAbsPathLength = rootDir.getAbsolutePath().length();
         for (File mp4File : FileUtils.listFiles(rootDir, new SuffixFileFilter(new String[]{".mp4", ".mpg4", ".mpeg4"}, IOCase.INSENSITIVE), TrueFileFilter.INSTANCE)) {
-            File newFile = renameVideoByDate(parsedOptions, mp4File, rootDirAbsPathLength);
-            if (newFile == null) {
-                continue;
-            }
-            reEncodeVideo(parsedOptions, newFile);
+            renameVideoByDateAndReEncode(parsedOptions, mp4File, rootDirAbsPathLength);
         }
     }
 
-    private static File renameVideoByDate(ParsedOptions parsedOptions, File mp4File, int rootDirAbsPathLength) throws Exception {
+    private static void renameVideoByDateAndReEncode(ParsedOptions parsedOptions, File mp4File, int rootDirAbsPathLength) throws Exception {
         FFprobe ffprobe = new FFprobe(new File(parsedOptions.ffmpegHome, "ffprobe").getAbsolutePath());
         FFmpegProbeResult probeResult = ffprobe.probe(mp4File.getAbsolutePath());
 
         if (!probeResult.getFormat().tags.containsKey("creation_time")) {
             System.err.println("No creation_time tag found in " + mp4File.getAbsolutePath() + ". Skipping");
-            return null;
+            return;
         }
         Date creationTime = VID_DATE_FORMAT.parse(probeResult.getFormat().tags.get("creation_time"));
         File newFile = datedFile(mp4File, creationTime, ".mp4");
         if (newFile == null) {
-            return null;
+            return;
         }
         System.out.println("Renaming " + mp4File.getAbsolutePath().substring(rootDirAbsPathLength)
                 + " to " + newFile.getAbsolutePath().substring(rootDirAbsPathLength));
         FileUtils.moveFile(mp4File, newFile);
-        return newFile;
+        reEncodeVideo(parsedOptions, newFile, probeResult.getStreams().get(0).width, probeResult.getStreams().get(0).height);
     }
 
-    private static void reEncodeVideo(ParsedOptions parsedOptions, File newFile) throws Exception {
+    private static void reEncodeVideo(ParsedOptions parsedOptions, File newFile, int originalWidth, int originalHeight) throws Exception {
         FFmpeg ffmpeg = new FFmpeg(new File(parsedOptions.ffmpegHome, "ffmpeg").getAbsolutePath());
         FFprobe ffprobe = new FFprobe(new File(parsedOptions.ffmpegHome, "ffprobe").getAbsolutePath());
 
         String newFileName = newFile.getAbsolutePath();
         File tempOutputFile = new File(newFileName.substring(0, newFileName.length() - 4) + "_temp" + RANDOM.nextInt(0, 99) + ".mp4");
+        int newWidth = originalWidth * 720 / originalHeight;
 
         FFmpegBuilder builder = new FFmpegBuilder()
                 .setInput(newFile.getAbsolutePath())
@@ -178,8 +175,10 @@ public class Main {
                 .setAudioBitRate(32768)      // at 32 kbit/s
                 .setVideoCodec("libx264")     // Video using x264
                 .setVideoFrameRate(24, 1)     // at 24 frames per second
-                .setVideoResolution(720, 540) // at 720x540 resolution
+                .setVideoResolution(newWidth, 720) // with a height of 720p and keeping proportions
                 .setStrict(FFmpegBuilder.Strict.EXPERIMENTAL) // Allow FFmpeg to use experimental specs
+                .setVideoMovFlags("use_metadata_tags") // copy metadata like capture date
+                .addExtraArgs("-map_metadata", "0")
                 .done();
 
         System.out.println("Reencoding " + newFile.getAbsolutePath() + " to " + tempOutputFile.getAbsolutePath() + " to X264 720p + AAC");
