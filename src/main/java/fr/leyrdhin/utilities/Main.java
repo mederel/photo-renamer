@@ -10,6 +10,7 @@ import net.bramp.ffmpeg.FFmpegExecutor;
 import net.bramp.ffmpeg.FFprobe;
 import net.bramp.ffmpeg.builder.FFmpegBuilder;
 import net.bramp.ffmpeg.probe.FFmpegProbeResult;
+import net.bramp.ffmpeg.probe.FFmpegStream;
 import org.apache.commons.cli.*;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOCase;
@@ -20,15 +21,14 @@ import java.io.File;
 import java.io.IOException;
 import java.security.SecureRandom;
 import java.text.SimpleDateFormat;
-import java.util.Collection;
-import java.util.Date;
-import java.util.TimeZone;
+import java.util.*;
 
 public class Main {
     private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyyMMdd_HHmmss");
     private static final SimpleDateFormat VID_DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS");
 
     static {
+//        DATE_FORMAT.setTimeZone(TimeZone.getTimeZone("UTC"));
         VID_DATE_FORMAT.setTimeZone(TimeZone.getTimeZone("UTC"));
     }
 
@@ -66,15 +66,12 @@ public class Main {
     }
 
     private static class ParsedOptions {
-        private final TimeZone timeZone;
         private final File ffmpegHome;
 
         ParsedOptions(CommandLine parsedArgs) {
-            this.timeZone = TimeZone.getTimeZone(parsedArgs.hasOption('t') ? parsedArgs.getOptionValue('t') : "Europe/Paris");
             this.ffmpegHome = new File(parsedArgs.hasOption('f') ? parsedArgs.getOptionValue('f') : "/usr/bin");
         }
     }
-
 
     private static void renamePhotos(File rootDir, ParsedOptions parsedArgs, String[] sourceExtensions, String targetExtension) throws ImageProcessingException, IOException {
         int rootDirAbsPathLength = rootDir.getAbsolutePath().length();
@@ -83,10 +80,9 @@ public class Main {
             Metadata metadata = ImageMetadataReader.readMetadata(jpegFile);
             Collection<ExifSubIFDDirectory> exifDirectoryBase = metadata.getDirectoriesOfType(ExifSubIFDDirectory.class);
             for (ExifDirectoryBase directory : exifDirectoryBase) {
-//                Date date = directory.getDate(ExifDirectoryBase.TAG_DATETIME_DIGITIZED, parsedArgs.timeZone);
-                Date date = directory.getDate(ExifDirectoryBase.TAG_DATETIME_DIGITIZED, parsedArgs.timeZone);
+                Date date = directory.getDate(ExifDirectoryBase.TAG_DATETIME_DIGITIZED); //, parsedArgs.timeZone);
                 if (date != null) {
-                    date = correctWithTimezone(parsedArgs, directory, date);
+                    date = correctDateWithTimezone(jpegFile, date, exifDirectoryBase);
                     File newFile = datedFile(jpegFile, date, targetExtension);
                     if (newFile == null) {
                         break;
@@ -100,16 +96,20 @@ public class Main {
         }
     }
 
-    private static Date correctWithTimezone(ParsedOptions parsedArgs, ExifDirectoryBase directory, Date date) {
-        String tzDigit = directory.getString(ExifDirectoryBase.TAG_TIME_ZONE_DIGITIZED);
-        int rawOffset = parsedArgs.timeZone.getRawOffset();
-        if (tzDigit != null) {
-            String tzDigitWithoutMinutes = tzDigit.replaceFirst("^(.*):.*$", "$1");
-            long tzOffset = Integer.parseInt(tzDigitWithoutMinutes) * 60 * 1000;
-            date = new Date(date.getTime() + tzOffset - rawOffset);
-
+    private static Date correctDateWithTimezone(File file, Date date, Collection<ExifSubIFDDirectory> exifDirectoryBase) {
+        String zoneOffset = null;
+        for (ExifDirectoryBase directory : exifDirectoryBase) {
+            zoneOffset = Optional.ofNullable(directory.getString(ExifDirectoryBase.TAG_TIME_ZONE)).orElse(zoneOffset);
+            if (zoneOffset != null) {
+                break;
+            }
         }
-        return date;
+        if (zoneOffset != null) {
+            String zoneOffsetWithoutMinutes = zoneOffset.replaceFirst("^(.*):.*$", "$1");
+            long zoneOffsetMillis = Integer.parseInt(zoneOffsetWithoutMinutes) * 60 * 60 * 1000L;
+            return new Date(date.getTime() - zoneOffsetMillis);
+        }
+        throw new IllegalStateException("No timezone found in " + file);
     }
 
     private static File datedFile(File sourceFile, Date date, String extension) {
@@ -153,16 +153,28 @@ public class Main {
         System.out.println("Renaming " + mp4File.getAbsolutePath().substring(rootDirAbsPathLength)
                 + " to " + newFile.getAbsolutePath().substring(rootDirAbsPathLength));
         FileUtils.moveFile(mp4File, newFile);
-        reEncodeVideo(parsedOptions, newFile, probeResult.getStreams().get(0).width, probeResult.getStreams().get(0).height);
+        reEncodeVideo(parsedOptions, newFile, probeResult.getStreams().get(0));
     }
 
-    private static void reEncodeVideo(ParsedOptions parsedOptions, File newFile, int originalWidth, int originalHeight) throws Exception {
+    private static void reEncodeVideo(ParsedOptions parsedOptions, File newFile, FFmpegStream fFmpegStream) throws Exception {
         FFmpeg ffmpeg = new FFmpeg(new File(parsedOptions.ffmpegHome, "ffmpeg").getAbsolutePath());
         FFprobe ffprobe = new FFprobe(new File(parsedOptions.ffmpegHome, "ffprobe").getAbsolutePath());
 
         String newFileName = newFile.getAbsolutePath();
         File tempOutputFile = new File(newFileName.substring(0, newFileName.length() - 4) + "_temp" + RANDOM.nextInt(0, 99) + ".mp4");
-        int newWidth = originalWidth * 720 / originalHeight;
+        int newWidth;
+        int newHeight;
+        if (fFmpegStream.side_data_list!=null && fFmpegStream.side_data_list[0].rotation % 180 != 0) {
+            newWidth = 720;
+            // because of the rotation, the original width is actually the height of the capture video and vice versa
+            newHeight = fFmpegStream.width * 720 / fFmpegStream.height;
+        } else {
+            newWidth = fFmpegStream.width * 720 / fFmpegStream.height;
+            newHeight = 720;
+        }
+
+        System.out.println("Original width: " + fFmpegStream.width + ", original height: " + fFmpegStream.height + ", rotation: " + (fFmpegStream.side_data_list!=null?fFmpegStream.side_data_list[0].rotation:0));
+        System.out.println("New width: " + newWidth + ", new height: " + newHeight);
 
         FFmpegBuilder builder = new FFmpegBuilder()
                 .setInput(newFile.getAbsolutePath())
@@ -175,7 +187,7 @@ public class Main {
                 .setAudioBitRate(32768)      // at 32 kbit/s
                 .setVideoCodec("libx264")     // Video using x264
                 .setVideoFrameRate(24, 1)     // at 24 frames per second
-                .setVideoResolution(newWidth, 720) // with a height of 720p and keeping proportions
+                .setVideoResolution(newWidth, newHeight) // with a height of 720p and keeping proportions
                 .setStrict(FFmpegBuilder.Strict.EXPERIMENTAL) // Allow FFmpeg to use experimental specs
                 .setVideoMovFlags("use_metadata_tags") // copy metadata like capture date
                 .addExtraArgs("-map_metadata", "0")
